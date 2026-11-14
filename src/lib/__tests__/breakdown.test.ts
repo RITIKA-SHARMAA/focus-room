@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { breakdownRequestSchema, buildUserPrompt, normalize, parseGeminiResponse } from "../breakdown";
+import { breakdownRequestSchema, buildUserPrompt, modelChain, normalize, parseGeminiResponse } from "../breakdown";
 
 const gemini = (text: string) => ({ candidates: [{ content: { parts: [{ text }] } }] });
 
@@ -120,7 +120,44 @@ describe("parseGeminiResponse", () => {
     expect(() => parseGeminiResponse({})).toThrow();
   });
 
+  it("ignores thought parts from thinking models", () => {
+    const body = {
+      candidates: [
+        {
+          content: {
+            parts: [
+              { text: "Let me plan this...", thought: true },
+              { text: '{"steps":[{"title":"Plan","pomodoros":1},{"title":"Do","pomodoros":1}]}' },
+            ],
+          },
+        },
+      ],
+    };
+    expect(parseGeminiResponse(body).steps).toHaveLength(2);
+  });
+
+  it("explains why a response was empty", () => {
+    expect(() => parseGeminiResponse({ candidates: [{ finishReason: "SAFETY", content: { parts: [] } }] })).toThrow("SAFETY");
+  });
+
   it("throws on malformed JSON", () => {
     expect(() => parseGeminiResponse(gemini("{steps: oops"))).toThrow();
+  });
+});
+
+describe("modelChain", () => {
+  it("uses the default model then the fallbacks", () => {
+    expect(modelChain({})).toEqual(["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash"]);
+  });
+
+  it("lets env override both, trimming and de-duplicating", () => {
+    expect(modelChain({ GEMINI_MODEL: "gemini-2.5-flash", GEMINI_FALLBACK_MODELS: " gemini-2.5-flash , gemini-x " })).toEqual([
+      "gemini-2.5-flash",
+      "gemini-x",
+    ]);
+  });
+
+  it("an empty fallback list turns fallbacks off", () => {
+    expect(modelChain({ GEMINI_FALLBACK_MODELS: "" })).toEqual(["gemini-flash-lite-latest"]);
   });
 });

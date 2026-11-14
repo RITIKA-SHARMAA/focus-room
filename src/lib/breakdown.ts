@@ -118,26 +118,61 @@ export function normalize(raw: unknown): Breakdown {
 
 /** Pull the JSON text out of a Gemini generateContent response and normalize it. */
 export function parseGeminiResponse(body: unknown): Breakdown {
-  const text = (
+  const candidate = (
     body as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
+      candidates?: { finishReason?: string; content?: { parts?: { text?: string; thought?: boolean }[] } }[];
+      promptFeedback?: { blockReason?: string };
     }
-  )?.candidates?.[0]?.content?.parts
-    ?.map((p) => p.text ?? "")
+  )?.candidates?.[0];
+  // Thinking models can include "thought" parts; only the answer parts hold the JSON.
+  const text = candidate?.content?.parts
+    ?.filter((p) => !p.thought)
+    .map((p) => p.text ?? "")
     .join("")
     .trim();
-  if (!text) throw new Error("Empty response from model.");
+  if (!text) {
+    const reason = candidate?.finishReason ?? (body as { promptFeedback?: { blockReason?: string } })?.promptFeedback?.blockReason;
+    throw new Error(`Empty response from model${reason ? ` (${reason})` : ""}.`);
+  }
   // responseMimeType should give bare JSON, but tolerate a ```json fence.
   const json = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  return normalize(JSON.parse(json));
+  let data: unknown;
+  try {
+    data = JSON.parse(json);
+  } catch {
+    throw new Error(`Model returned invalid JSON (finishReason: ${candidate?.finishReason ?? "unknown"}): ${json.slice(0, 160)}`);
+  }
+  return normalize(data);
 }
 
 /** Error codes the API returns; the UI maps each to a friendly message. */
-export type BreakdownErrorCode = "invalid_input" | "ai_unavailable" | "rate_limited" | "ai_failed";
+export type BreakdownErrorCode = "invalid_input" | "ai_unavailable" | "rate_limited" | "ai_busy" | "ai_timeout" | "ai_failed";
 
 export const ERROR_MESSAGES: Record<BreakdownErrorCode, string> = {
   invalid_input: "Describe the task in 3 to 200 characters.",
   ai_unavailable: "The AI helper isn't set up on this deployment yet. You can still add steps by hand.",
   rate_limited: "That's a lot of plans in a short time. Try again in a few minutes.",
+  ai_busy: "Google's AI is overloaded right now. Try again in a minute.",
+  ai_timeout: "The AI took too long to answer. Give it another try.",
   ai_failed: "Couldn't build a plan this time. Try rewording the task.",
 };
+
+/* ---------------------------------------------------------------- Models */
+
+/**
+ * Lite first: splitting a task into steps is a small job, and the lite model is
+ * the fastest and least likely to be overloaded on the free tier.
+ */
+export const DEFAULT_MODEL = "gemini-flash-lite-latest";
+/** Tried in order when the main model is overloaded ("high demand"), slow or unavailable. */
+export const DEFAULT_FALLBACKS = ["gemini-flash-latest", "gemini-2.5-flash"];
+
+/**
+ * GEMINI_MODEL overrides the main model; GEMINI_FALLBACK_MODELS (comma-separated)
+ * overrides the fallbacks, and an empty value turns fallbacks off.
+ */
+export function modelChain(env: Record<string, string | undefined> = process.env): string[] {
+  const primary = env.GEMINI_MODEL || DEFAULT_MODEL;
+  const fallbacks = env.GEMINI_FALLBACK_MODELS !== undefined ? env.GEMINI_FALLBACK_MODELS.split(",") : DEFAULT_FALLBACKS;
+  return [...new Set([primary, ...fallbacks].map((m) => m.trim()).filter(Boolean))];
+}

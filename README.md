@@ -75,7 +75,9 @@ Event sounds (drips, crackles, key clicks, thunder) are booked by a look-ahead s
 1. The client sends `{ task, minutes?, focusMin }`.
 2. The route validates it with Zod (3–200 characters) and returns `400` if invalid.
 3. A per-visitor rate limit (8 requests per 10 minutes) protects the free API quota and returns `429`.
-4. It calls Gemini with a system prompt, `responseMimeType: "application/json"` and a `responseSchema`, and a 20 s timeout. The prompt treats the task text as data, not instructions, to resist prompt injection.
+4. It calls Gemini with a system prompt, `responseMimeType: "application/json"`, a `responseSchema`, and a low thinking level on the full Flash models, so a simple plan doesn't wait on deep reasoning. The prompt treats the task text as data, not instructions, to resist prompt injection.
+   - It starts with the fast lite model and falls back down a chain (`gemini-flash-lite-latest` → `gemini-flash-latest` → `gemini-2.5-flash`, configurable with `GEMINI_MODEL` and `GEMINI_FALLBACK_MODELS`) when a model is overloaded ("high demand", `503`), missing, erroring or slower than 14 s, all within one 45 s budget.
+   - If every model is busy, it returns `503 ai_busy`. A timeout returns `504 ai_timeout`.
 5. `normalize()` enforces the rules in code rather than trusting the model. It parses the shape, strips list markers, trims and capitalises titles, drops duplicates, clamps estimates to 1–4 sessions, caps the plan at 8 steps and titles at 80 characters, and rejects anything with fewer than 2 usable steps (`502`).
 6. With no `GEMINI_API_KEY` set, the route returns `503`. The UI then shows a friendly message, and the rest of the app works normally.
 
@@ -106,7 +108,7 @@ npm run typecheck
 npm run lint
 ```
 
-The API route tests mock `fetch`. They check that the key is sent in a header and never in the URL, and they cover each error path (`400`, `429`, `502`, `503`). CI runs lint, type-check, tests and a production build on every push.
+The API route tests mock `fetch`. They check that the key is sent in a header and never in the URL, that the app falls back to the next model when one is overloaded, and they cover each error path (`400`, `429`, `502`, `503`, `504`). CI runs lint, type-check, tests and a production build on every push.
 
 ## Run locally
 

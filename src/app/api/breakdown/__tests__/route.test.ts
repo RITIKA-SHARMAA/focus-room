@@ -42,7 +42,115 @@ describe("POST /api/breakdown", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).not.toContain("test-key");
     expect(init.headers["x-goog-api-key"]).toBe("test-key");
-    expect(JSON.parse(init.body).generationConfig.responseMimeType).toBe("application/json");
+    const sent = JSON.parse(init.body).generationConfig;
+    expect(sent.responseMimeType).toBe("application/json");
+    // The default lite model keeps its own (minimal) thinking level.
+    expect(sent.thinkingConfig).toBeUndefined();
+  });
+
+  it("asks full Flash models for a low thinking level", async () => {
+    vi.stubEnv("GEMINI_MODEL", "gemini-flash-latest");
+    const fetchMock = vi.fn().mockResolvedValue(
+      geminiOk([
+        { title: "Outline", pomodoros: 1 },
+        { title: "Draft", pomodoros: 2 },
+      ]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { POST } = await import("../route");
+    await POST(req({ task: "Write the essay" }));
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low" });
+  });
+
+  it("retries without thinkingConfig if the model rejects it", async () => {
+    vi.stubEnv("GEMINI_MODEL", "gemini-flash-latest");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{"error":{"message":"Invalid value at thinking_config.thinking_level"}}', { status: 400 }))
+      .mockResolvedValueOnce(
+        geminiOk([
+          { title: "Outline", pomodoros: 1 },
+          { title: "Draft", pomodoros: 2 },
+        ]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { POST } = await import("../route");
+    const res = await POST(req({ task: "Write the essay" }));
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body).generationConfig.thinkingConfig).toBeUndefined();
+  });
+
+  it("does not retry other 400 errors", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{"error":{"message":"API key not valid"}}', { status: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { POST } = await import("../route");
+    expect((await POST(req({ task: "Write the essay" }))).status).toBe(502);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the next model when the first is overloaded", async () => {
+    const busy = '{"error":{"code":503,"message":"This model is currently experiencing high demand."}}';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(busy, { status: 503 }))
+      .mockResolvedValueOnce(
+        geminiOk([
+          { title: "Outline", pomodoros: 1 },
+          { title: "Draft", pomodoros: 2 },
+        ]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { POST } = await import("../route");
+    const res = await POST(req({ task: "Write the essay" }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).model).toBe("gemini-flash-latest");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("gemini-flash-lite-latest:");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("gemini-flash-latest:");
+  });
+
+  it("503 ai_busy when every model is overloaded", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async () => new Response("{}", { status: 503 })),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { POST } = await import("../route");
+    const res = await POST(req({ task: "Write the essay" }));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "ai_busy" });
+  });
+
+  it("moves on to the next model when one is too slow", async () => {
+    const err = new Error("The operation was aborted due to timeout");
+    err.name = "TimeoutError";
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(err)
+      .mockResolvedValueOnce(
+        geminiOk([
+          { title: "Outline", pomodoros: 1 },
+          { title: "Draft", pomodoros: 2 },
+        ]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { POST } = await import("../route");
+    const res = await POST(req({ task: "Write the essay" }));
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("504 with a timeout code when every model is too slow", async () => {
+    const err = new Error("The operation was aborted due to timeout");
+    err.name = "TimeoutError";
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(err));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { POST } = await import("../route");
+    const res = await POST(req({ task: "Study for exam" }));
+    expect(res.status).toBe(504);
+    expect(await res.json()).toEqual({ error: "ai_timeout" });
   });
 
   it("400 on invalid input, without calling the model", async () => {
@@ -69,7 +177,10 @@ describe("POST /api/breakdown", () => {
   });
 
   it("502 when the upstream call fails", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("boom", { status: 500 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async () => new Response("boom", { status: 500 })),
+    );
     const { POST } = await import("../route");
     expect((await POST(req({ task: "Study for exam" }))).status).toBe(502);
   });
