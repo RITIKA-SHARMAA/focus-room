@@ -2,7 +2,7 @@
 
 An animated study and work space in the browser: a Pomodoro timer over cozy moving scenes, ambient sound that is generated live (no audio files), a task list, focus stats, and a small AI helper that turns one big task into Pomodoro-sized steps.
 
-**Live:** _add your Vercel link here_
+**Live:** [focus-room-topaz-ten.vercel.app](https://focus-room-topaz-ten.vercel.app)
 
 ![Focus Room, Rainy Night scene](docs/screenshot-rain.png)
 
@@ -52,7 +52,6 @@ flowchart LR
   API -- normalized steps --> UI
 ```
 
-The page itself is static. The only server code is one route handler, and it exists so the Gemini API key never reaches the browser.
 
 ### How the main parts work
 
